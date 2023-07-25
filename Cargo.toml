@@ -1,0 +1,21 @@
+[package]
+name = "daafsv2"
+version = "0.1.0"
+edition = "2021"
+description = "Attempt 2 at making discord a filesystem"
+
+[lib]
+name = "daafs"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+env_logger = "0.10.0"
+log = "0.4.19"
+nbdkit = "0.3.0"
+reqwest = "0.11.18"
+serenity = { version = "0.11.6", default-features = false, features = ["client", "model", "http", "gateway", "builder", "rustls_backend"] }
+tokio = { version = "1.29.1", features = ["rt", "rt-multi-thread"] }
+
+[build-dependencies]
+dotenv = "0.15.0"
