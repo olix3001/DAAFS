@@ -1,8 +1,9 @@
-use std::sync::Mutex;
+use std::sync::{Mutex, Arc};
 
 use cache::Cache;
-use metadata::MetadataBlock;
+use metadata::{MetadataBlock, Page};
 use nbdkit::Server;
+use queue::Queue;
 use serenity::Client;
 use serenity::http::Http;
 use serenity::{model::prelude::ChannelId, prelude::GatewayIntents};
@@ -12,15 +13,17 @@ use crate::cache::CacheBlock;
 pub mod utils;
 pub mod metadata;
 pub mod cache;
+pub mod queue;
 
 /// Basic struct representing this plugin.
 struct DiscordDrivePlugin {
     client: Client,
     rt: tokio::runtime::Runtime,
-    meta: Mutex<Vec<MetadataBlock>>,
+    meta: Arc<Mutex<Vec<MetadataBlock>>>,
     channel: ChannelId,
 
-    cache: Cache<4>
+    cache: Cache<4>,
+    queue: Queue<4>,
 }
 
 impl DiscordDrivePlugin {
@@ -29,12 +32,50 @@ impl DiscordDrivePlugin {
     }
 
     pub fn cache(&self, block: CacheBlock) {
-        self.cache.push(block);
+        if let Some(block) = self.cache.push(block) {
+            self.queue.push(Page {
+                offset: block.offset,
+                message_id: block.message_id,
+                zero_mask: block.mask,
+            }, block.data);
+        }
+    }
+
+    /// Tries to read from cache ensuring that the data is NOT in the queue.
+    pub fn read_cache(&self, offset: u64) -> Option<Vec<u8>> {
+        // Check if the data is in the queue.
+        if let Some((page, data)) = self.queue.release_offset(offset / (1024*1024*8)) {
+            // Cache the data.
+            self.cache(CacheBlock::new(offset / (1024*1024*8), page.message_id, data, page.zero_mask));
+
+            // Return the data. Now from the cache.
+            return self.cache.read(offset);
+        }
+
+        if let Some(data) = self.cache.read(offset) {
+            return Some(data.to_vec());
+        }
+
+        None
+    }
+
+    /// Tries to write to cache ensuring that the data is NOT in the queue.
+    pub fn write_cache(&self, offset: u64, dataa: &[u8]) -> bool {
+        // Check if the data is in the queue.
+        if let Some((page, data)) = self.queue.release_offset(offset / (1024*1024*8)) {
+            // Cache the data.
+            self.cache(CacheBlock::new(offset / (1024*1024*8), page.message_id, data, page.zero_mask));
+
+            // Return the data. Now from the cache.
+            return self.cache.write(offset, dataa);
+        }
+
+        self.cache.write(offset, dataa)
     }
 
     pub fn read(&self, offset: u64) -> Vec<u8> {
         // Try to read from cache first.
-        if let Some(data) = self.cache.read(offset) {
+        if let Some(data) = self.read_cache(offset) {
             return data.to_vec();
         }
 
@@ -44,8 +85,11 @@ impl DiscordDrivePlugin {
             if let Some(data) = self.rt.block_on(async {
                 block.try_read(&self.channel, self.http(), offset).await
             }) {
+                // Drop the lock to prevent deadlock on the same thread.
+                drop(meta);
+
                 // Cache the data.
-                self.cache(CacheBlock::new(offset / (1024*1024*8), data.0, data.1));
+                self.cache(CacheBlock::new(offset / (1024*1024*8), data.1.message_id, data.0, data.1.zero_mask));
 
                 // Return the data. Now from the cache.
                 return self.cache.read(offset).unwrap();
@@ -57,7 +101,7 @@ impl DiscordDrivePlugin {
 
     pub fn write(&self, offset: u64, data: &[u8]) {
         // Try to write to cache first.
-        if self.cache.write(offset, data) {
+        if self.write_cache(offset, data) {
             return;
         }
 
@@ -66,10 +110,13 @@ impl DiscordDrivePlugin {
             if let Some(data) = self.rt.block_on(async {
                 block.try_write(&self.channel, self.http(), offset, data).await
             }) {
-                // Cache the data.
-                self.cache(CacheBlock::new(offset / (1024*1024*8), data.0, data.1));
+                // Drop the lock to prevent deadlock on the same thread.
+                drop(meta);
 
-                // Return the data. Now from the cache.
+                // Cache the data.
+                self.cache(CacheBlock::new(offset / (1024*1024*8), data.1.message_id, data.0, data.1.zero_mask));
+
+                // Return.
                 return;
             }
         }
@@ -79,9 +126,15 @@ impl DiscordDrivePlugin {
         if let Some(data) = self.rt.block_on(async {
             block.try_write(&self.channel, self.http(), offset, data).await
         }) {
+            // Drop the lock to prevent deadlock on the same thread.
+            drop(meta);
+
             // Cache the data.
-            self.cache(CacheBlock::new(offset / (1024*1024*8), data.0, data.1));
+            self.cache(CacheBlock::new(offset / (1024*1024*8), data.1.message_id, data.0, data.1.zero_mask));
         }
+
+        // Acquire the lock again.
+        let mut meta = self.meta.lock().unwrap();
 
         meta.push(block);
 
@@ -110,13 +163,19 @@ impl Default for DiscordDrivePlugin {
             MetadataBlock::load_all(&client.cache_and_http.http, channel, 500).await
         });
 
+        let meta = Arc::new(Mutex::new(meta));
+
+        let queue = Queue::new();
+        let queue = queue.start_sync_thread(client.cache_and_http.http.clone(), channel.clone(), meta.clone());
+
         Self {
             rt,
-            meta: Mutex::new(meta),
+            meta,
             client,
             channel,
 
-            cache: Cache::new()
+            cache: Cache::new(),
+            queue: queue,
         }
     }
 }

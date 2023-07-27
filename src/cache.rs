@@ -8,14 +8,16 @@ pub struct Cache<const S: usize> {
 
 pub struct CacheBlock {
     pub offset: u64,
+    pub message_id: u64,
     pub data: Vec<u8>,
     pub mask: BitMask<256>,
 }
 
 impl CacheBlock {
-    pub fn new(offset: u64, data: Vec<u8>, mask: BitMask<256>) -> Self {
+    pub fn new(offset: u64, message_id: u64, data: Vec<u8>, mask: BitMask<256>) -> Self {
         Self {
             offset,
+            message_id,
             data,
             mask,
         }
@@ -32,8 +34,9 @@ impl<const S: usize> Cache<S> {
     pub fn read(&self, offset: u64) -> Option<Vec<u8>> {
         let data = self.data.lock().unwrap();
         for block in data.iter() {
-            if offset >= block.offset && offset + 4096 < block.offset + block.data.len() as u64 {
-                let offset = (offset - block.offset) as usize;
+            let bo = block.offset * 1024 * 1024 * 8;
+            if offset >= bo && offset + 4096 <= bo + block.data.len() as u64 {
+                let offset = (offset - bo) as usize;
                 // Use mask
                 if block.mask.get(offset / 4096) {
                     return Some(vec![0; 4096]);
@@ -50,8 +53,9 @@ impl<const S: usize> Cache<S> {
     pub fn write(&self, offset: u64, data: &[u8]) -> bool {
         let mut sdata = self.data.lock().unwrap();
         for block in sdata.iter_mut() {
-            if offset >= block.offset && offset + 4096 < block.offset + block.data.len() as u64 {
-                let offset = (offset - block.offset) as usize;
+            let bo = block.offset * 1024 * 1024 * 8;
+            if offset >= bo && offset + 4096 <= bo + block.data.len() as u64 {
+                let offset = (offset - bo) as usize;
                 block.data[offset..offset + 4096].copy_from_slice(data);
 
                 // Flip mask if needed
@@ -96,12 +100,14 @@ mod test {
         cache.push(CacheBlock {
             offset: 0,
             data: vec![0; 8*MB],
+            message_id: 0,
             mask: BitMask::new(),
         });
 
         cache.push(CacheBlock {
             offset: 8*MB as u64,
             data: vec![1; 8*MB],
+            message_id: 0,
             mask: BitMask::new(),
         });
 
@@ -118,6 +124,7 @@ mod test {
         cache.push(CacheBlock {
             offset: 16*MB as u64,
             data: vec![2; 8*MB],
+            message_id: 0,
             mask: BitMask::new(),
         });
 

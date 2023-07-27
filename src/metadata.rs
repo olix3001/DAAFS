@@ -11,6 +11,7 @@ pub struct MetadataBlock {
 }
 
 /// Each page is 8MB of data that is stored in a discord message
+#[derive(Clone)]
 pub struct Page {
     /// Offset of this page (stored as a multiple of 8MB)
     pub offset: u64,
@@ -114,19 +115,19 @@ impl MetadataBlock {
         blocks
     }
 
-    pub async fn try_read(&self, channel: &ChannelId, http: &Http, offset: u64) -> Option<(Vec<u8>, BitMask<256>)> {
+    pub async fn try_read(&self, channel: &ChannelId, http: &Http, offset: u64) -> Option<(Vec<u8>, Page)> {
         // Check if page exists
         let page = self.pages.iter().find(|page| page.offset == offset / (1024*1024*8));
 
         if let Some(page) = page {
             // Read page
-            Some((page.read(channel, http, offset).await, page.zero_mask.clone()))
+            Some((page.read(channel, http, offset).await, page.clone()))
         } else {
             None
         }
     }
 
-    pub async fn try_write(&mut self, channel: &ChannelId, http: &Http, offset: u64, data: &[u8]) -> Option<(Vec<u8>, BitMask<256>)> {
+    pub async fn try_write(&mut self, channel: &ChannelId, http: &Http, offset: u64, data: &[u8]) -> Option<(Vec<u8>, Page)> {
         // Check if page with offset exists
         let page = self.pages.iter_mut().find(|page| page.offset == offset / (1024*1024*8));
 
@@ -149,6 +150,21 @@ impl MetadataBlock {
         self.pages.push(page);
         self.update_message(http, channel).await;
         d
+    }
+
+    pub async fn update_page(&mut self, http: &Http, channel: &ChannelId, page_new: Page) -> bool {
+        // Check if page with offset exists
+        let page = self.pages.iter_mut().find(|page| page.offset == page_new.offset);
+
+        if let Some(page) = page {
+            page.message_id = page_new.message_id;
+            page.zero_mask = page_new.zero_mask;
+        } else {
+            return false;
+        }
+
+        self.update_message(http, channel).await;
+        true
     }
 
     pub async fn update_message(&mut self, http: &Http, channel: &ChannelId) {
@@ -235,7 +251,7 @@ impl Page {
     }
 
     /// Write at relative offset. Returns new data if the page was modified.
-    pub async fn write(&mut self, channel: &ChannelId, http: &Http, ooffset: u64, data: &[u8]) -> Option<(Vec<u8>, BitMask<256>)> {
+    pub async fn write(&mut self, channel: &ChannelId, http: &Http, ooffset: u64, data: &[u8]) -> Option<(Vec<u8>, Page)> {
         let mut current_data = vec![0; 1024 * 1024 * 8];
         let offset = ooffset - self.offset * 1024 * 1024 * 8;
 
@@ -250,7 +266,7 @@ impl Page {
             // Set mask
             self.zero_mask.set((offset / 4096) as usize, true);
 
-            return Some((current_data, self.zero_mask.clone()));
+            return Some((current_data, self.clone()));
         }
 
         // Modify data
@@ -272,14 +288,14 @@ impl Page {
         // self.message_id = message.id.0;
 
         // Return
-        Some((current_data, self.zero_mask.clone()))
+        Some((current_data, self.clone()))
     }
 
     pub async fn update_message(&mut self, http: &Http, channel: &ChannelId, data: &[u8]) {
         let page_name = format!("page_{}.bin", self.offset);
         if self.message_id != 0 {
             // Delete old message
-            channel.delete_message(http, self.message_id).await.unwrap();
+            channel.delete_message(http, self.message_id).await.ok();
         }
 
         // Create message
