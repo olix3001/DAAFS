@@ -1,4 +1,4 @@
-use std::sync::{Mutex, Arc};
+use std::sync::{Mutex, Arc, atomic::AtomicBool};
 
 use serenity::{http::Http, model::prelude::ChannelId};
 
@@ -8,6 +8,7 @@ use crate::metadata::{Page, MetadataBlock};
 pub struct Queue<const S: usize> {
     pub data: Arc<Mutex<Vec<QueueBlock>>>,
     pub thread: Option<std::thread::JoinHandle<()>>,
+    pub is_syncing: Arc<AtomicBool>,
 }
 
 pub struct QueueBlock {
@@ -33,6 +34,7 @@ impl<const S: usize> Queue<S> {
         Self {
             data: Arc::new(Mutex::new(Vec::with_capacity(S))),
             thread: None,
+            is_syncing: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -74,8 +76,36 @@ impl<const S: usize> Queue<S> {
         sdata.pop()
     }
 
+    /// Flushes the queue. This will block until the queue is empty.
+    pub fn flush(&self) {
+        let mut slen;
+        {
+            let sdata = self.data.lock().unwrap();
+            slen = sdata.len();
+        }
+
+        while slen > 0 {
+            // Wait for the queue to be empty.
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            {
+                let sdata = self.data.lock().unwrap();
+                slen = sdata.len();
+            }
+        }
+
+        println!("Waiting for last block to sync.");
+
+        // Wait for the thread to finish syncing.
+        while self.is_syncing.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        println!("Queue flushed.");
+    }
+
     pub fn start_sync_thread(mut self, http: Arc<Http>, channel_id: ChannelId, metadata: Arc<Mutex<Vec<MetadataBlock>>>) -> Self {
         let data = self.data.clone();
+        let is_syncing = Arc::clone(&self.is_syncing);
         let t = std::thread::spawn(move || {
             // TODO: Await multiple blocks at once.
             let rt = tokio::runtime::Runtime::new().unwrap();
@@ -89,6 +119,7 @@ impl<const S: usize> Queue<S> {
                 }
 
                 // Sync the data.
+                is_syncing.store(true, std::sync::atomic::Ordering::SeqCst);
                 let mut block = sdata.pop().unwrap();
                 // We don't need the lock anymore. Drop it.
                 drop(sdata);
@@ -105,6 +136,7 @@ impl<const S: usize> Queue<S> {
                         }
                     }
                 }); 
+                is_syncing.store(false, std::sync::atomic::Ordering::SeqCst);
 
                 println!("Synced block at offset {}.", block.page.offset);
             }

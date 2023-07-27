@@ -81,6 +81,21 @@ impl MetadataBlock {
         Self::from_text(message_id, &message.content)
     }
 
+    pub async fn move_to_bottom(&mut self, http: &Http, channel_id: ChannelId) {
+        if self.message_id != 0 {
+            // Delete old message
+            channel_id.delete_message(http, self.message_id).await.ok();
+        }
+
+        // Create message
+        let message = channel_id.send_message(http, |m| {
+            m.content(self.as_text())
+        }).await.unwrap();
+
+        // Set message id
+        self.message_id = message.id.0;
+    }
+
     pub async fn load_all(http: &Http, channel_id: ChannelId, mut limit: usize) -> Vec<Self> {
         let mut blocks = Vec::new();
 

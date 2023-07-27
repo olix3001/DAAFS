@@ -211,7 +211,29 @@ impl Server for DiscordDrivePlugin {
 
         Ok(())
     }
+
+    fn flush(&self) -> nbdkit::Result<()> {
+        for block in self.cache.data.lock().unwrap().drain(..) {
+            self.queue.push(Page {
+                offset: block.offset,
+                message_id: block.message_id,
+                zero_mask: block.mask,
+            }, block.data.clone());
+        }
+
+        self.queue.flush();
+
+        // Move all metadata blocks to the bottom of the channel.
+        let mut meta = self.meta.lock().unwrap();
+        for block in meta.iter_mut() {
+            self.rt.block_on(async {
+                block.move_to_bottom(self.http(), self.channel).await;
+            });
+        }
+
+        Ok(())
+    }
 }
 
 // Entry point for the plugin.
-nbdkit::plugin!(DiscordDrivePlugin { write_at });
+nbdkit::plugin!(DiscordDrivePlugin { write_at, flush });
