@@ -246,6 +246,12 @@ impl Page {
 
     /// Read at relative offset
     pub async fn read(&self, channel: &ChannelId, http: &Http, offset: u64) -> Vec<u8> {
+        // If page message id is 0, return empty data
+        if self.message_id == 0 {
+            return vec![0; 1024*1024*8];
+        }
+
+        // Calculate offset
         let offset = offset - self.offset * 1024 * 1024 * 8;
 
         // Check mask
